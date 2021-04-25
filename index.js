@@ -1,8 +1,17 @@
 const { AppServiceRegistration, Cli, Bridge, Logging } = require("matrix-appservice-bridge");
 const nconf = require("nconf");
+const { Kafka, CompressionTypes, CompressionCodecs } = require("kafkajs");
+const ZstdCodec = require('@kafkajs/zstd');
+const promiseRetry = require("promise-retry");
+
+CompressionCodecs[CompressionTypes.ZSTD] = ZstdCodec();
 
 nconf.argv()
-  .env();
+  .env({
+      separator: '__',
+      lowerCase: true,
+      parseValues: true,
+  });
 
 nconf.defaults({
     "domain": "localhost",
@@ -16,30 +25,42 @@ Logging.configure({
 
 const log = Logging.get("main");
 
-const domain = nconf.get("domain");
-const prefix = nconf.get("prefix");
-const homeserver = nconf.get("homeserver");
-const registration = nconf.get("registration");
-const send_to = nconf.get("send-to");
+const get_mandatory = (name) => {
+    const result = nconf.get(name);
+    if (!result) {
+        throw new Error(name + " not provided");
+    }
+    return result;
+}
+
+const domain = get_mandatory("domain");
+const prefix = get_mandatory("prefix");
+const homeserver = get_mandatory("homeserver");
+const registration = get_mandatory("registration");
+const send_to = get_mandatory("send_to");
+const brokers = get_mandatory("brokers").split(",");
+const consumer_group = get_mandatory("consumer_group");
+const consumer_topic = get_mandatory("consumer_topic");
+
 const localpart = prefix + "bot";
-
-if (!send_to) {
-    throw new Error("No address to send to provided");
-}
-
-if (!homeserver) {
-    throw new Error("No homeserver to send to provided");
-}
 
 log.info("Running with config",
     {
-        domain: domain,
-        prefix: prefix,
-        homeserver: homeserver,
-        registration: registration,
-        send_to: send_to,
+        domain,
+        prefix ,
+        homeserver,
+        registration,
+        send_to,
+        brokers,
+        consumer_group,
+        consumer_topic,
     }
 );
+
+const kafka = new Kafka({
+    clientId: 'matrix-appservice-kafka',
+    brokers,
+});
 
 const room_alias_local = (source) => {
     return prefix + "_" + source;
@@ -71,7 +92,7 @@ const get_or_create_room = async (bridge, source) => {
             const maybe_existing = await intent
                 .resolveRoom(alias)
                 .catch((error) => {
-                    log.info("Room not found: ", error);
+                    log.debug("Room not found: ", error);
                     return undefined;
                 });
             const room_id = await (async () => {
@@ -105,9 +126,9 @@ const ensure_target_in_room = async (bridge, room_id) => {
     const room_state = await intent.roomState(room_id);
     log.debug("Room state: ", room_state);
 
-    const target_is_member = room_state.some((element) => {
+    const target_is_member = room_state.filter((element) => {
         return element.type === "m.room.member" && element.user_id === send_to;
-    });
+    }).map((a) => a.content.membership).reduce((a, b) => b) === 'join';
 
     if (!target_is_member) {
         log.info("Adding target to room", { room_id, send_to });
@@ -126,6 +147,7 @@ const send_message = async (bridge, room_id, contents) => {
 };
 
 const run = async (port, config) => {
+    const consumer = kafka.consumer({ groupId: consumer_group });
     let bridge;
     bridge = new Bridge({
         homeserverUrl: homeserver,
@@ -147,14 +169,28 @@ const run = async (port, config) => {
     await bridge.loadDatabases();
     await bridge.run(port, config);
 
-    const intent = bridge.getIntent("@smsbot:seanp.ca");
-    intent.sendText("!hjGnvrpARXFsLdTJFk:seanp.ca", "hello");
+    await consumer.connect();
+    await consumer.subscribe({ topic: consumer_topic });
+    await consumer.run({
+        eachMessage: async ({ topic, partition, message }) => {
+            (async () => {
+                const value = JSON.parse(message.value);
+                log.info("Message received", { topic, partition, value });
+                const { timestamp, from, body } = value;
 
-    const id = await get_or_create_room(bridge, "10000000000");
-    log.info("id: ", id);
+                const source = from.replace("+", "");
 
-    await ensure_target_in_room(bridge, id);
-    await send_message(bridge, id, "test post, please ignore");
+                await promiseRetry(async (retry, number) => {
+                    log.debug("Retry number ", number);
+                    (async () => {
+                        const room_id = await get_or_create_room(bridge, source);
+                        await ensure_target_in_room(bridge, room_id);
+                        await send_message(bridge, room_id, body);
+                    })().catch(retry);
+                });
+            })().catch(log.error);
+        }
+    });
 };
 
 new Cli({

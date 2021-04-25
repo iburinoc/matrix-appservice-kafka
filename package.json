@@ -9,8 +9,11 @@
   "author": "Sean Purcell",
   "license": "ISC",
   "dependencies": {
+    "@kafkajs/zstd": "^0.1.1",
+    "kafkajs": "^1.15.0",
     "matrix-appservice-bridge": "^2.6.0",
     "nconf": "^0.11.2",
+    "promise-retry": "^2.0.1",
     "request": "^2.88.2"
   }
 }
