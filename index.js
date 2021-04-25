@@ -99,8 +99,29 @@ const get_or_create_room = async (bridge, source) => {
     }
 };
 
-const send_text = async (bridge, contents, source) => {
+const ensure_target_in_room = async (bridge, room_id) => {
+    const intent = await bridge.getIntent();
+    const room_state = await intent.roomState(room_id);
+    log.debug("Room state: ", room_state);
 
+    const target_is_member = room_state.some((element) => {
+        return element.type === "m.room.member" && element.user_id === send_to;
+    });
+
+    if (!target_is_member) {
+        log.info("Adding target to room", { room_id, send_to });
+        await intent.invite(room_id, send_to);
+    }
+};
+
+const send_message = async (bridge, room_id, contents) => {
+    const intent = await bridge.getIntent();
+    const message = {
+        body: contents,
+        msgtype: "m.text",
+    };
+    log.info("Sending message", message);
+    intent.sendMessage(room_id, message);
 };
 
 const run = async (port, config) => {
@@ -111,7 +132,7 @@ const run = async (port, config) => {
         registration: registration,
         controller: {
             onUserQuery: function(queriedUser) {
-                log.info("User queried ", queriedUser);
+                log.error("User queried ", queriedUser);
                 return {};
             },
             onEvent: function(request, context) {
@@ -130,6 +151,9 @@ const run = async (port, config) => {
 
     const id = await get_or_create_room(bridge, "10000000000");
     log.info("id: ", id);
+
+    await ensure_target_in_room(bridge, id);
+    await send_message(bridge, id, "test post, please ignore");
 };
 
 new Cli({
