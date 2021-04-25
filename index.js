@@ -57,46 +57,47 @@ const get_or_create_room = async (bridge, source) => {
     const intent = await bridge.getIntent();
 
     const alias = room_alias(source);
-    log.debug("Querying for room with alias", alias);
     const room_db = bridge.getRoomStore();
-    const existing_room = await room_db.selectOne({ alias });
-    if (existing_room) {
-        log.debug("Room found",
-            {
-                alias,
-                existing_room,
-            }
-        );
-        return existing_room.getId();
-    } else {
-        const maybe_existing = await intent
-            .resolveRoom(alias)
-            .catch((error) => {
-                log.info("Room not found: ", error);
-                return undefined;
-            });
-        const room_id = await (async () => {
-            if (maybe_existing) {
-                return maybe_existing;
-            } else {
-                const local_alias = room_alias_local(source);
-                const name = room_name(source);
-                const options = {
-                    room_alias_name: local_alias,
-                    name: name,
-                };
-                log.info("Creating room", options);
-                const { room_id } = await intent.createRoom({ options });
-                log.info("Created room", room_id);
+    const entries = await room_db.select({});
+    log.debug("Room entries: ", entries);
+    const room_id = await (async () => {
+        log.debug("Querying for room with alias", alias);
+        const existing_room = await room_db.selectOne({ "data.alias": alias });
+        if (existing_room) {
+            log.debug("Room found in room store");
+            return existing_room.id;
+        } else {
+            log.info("Room not found in room store");
+            const maybe_existing = await intent
+                .resolveRoom(alias)
+                .catch((error) => {
+                    log.info("Room not found: ", error);
+                    return undefined;
+                });
+            const room_id = await (async () => {
+                if (maybe_existing) {
+                    return maybe_existing;
+                } else {
+                    const local_alias = room_alias_local(source);
+                    const name = room_name(source);
+                    const options = {
+                        room_alias_name: local_alias,
+                        name: name,
+                    };
+                    log.info("Creating room", options);
+                    const { room_id } = await intent.createRoom({ options });
+                    log.info("Created room", room_id);
 
-                return room_id;
-            }
-        })();
+                    return room_id;
+                }
+            })();
 
-        await room_db.insert({ id: room_id, data: { alias }});
-        log.debug("Room got", { alias, room_id });
-        return room_id;
-    }
+            return room_id;
+        }
+    })();
+    await room_db.upsertEntry({ id: room_id, data: { alias, source }});
+    log.debug("Room got", { alias, room_id, source });
+    return room_id;
 };
 
 const ensure_target_in_room = async (bridge, room_id) => {
