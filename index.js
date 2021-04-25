@@ -128,7 +128,7 @@ const ensure_target_in_room = async (bridge, room_id) => {
 
     const target_is_member = room_state.filter((element) => {
         return element.type === "m.room.member" && element.user_id === send_to;
-    }).map((a) => a.content.membership).reduce((a, b) => b) === 'join';
+    }).map((a) => a.content.membership).reduce((a, b) => b, 'leave') === 'join';
 
     if (!target_is_member) {
         log.info("Adding target to room", { room_id, send_to });
@@ -186,7 +186,10 @@ const run = async (port, config) => {
                         const room_id = await get_or_create_room(bridge, source);
                         await ensure_target_in_room(bridge, room_id);
                         await send_message(bridge, room_id, body);
-                    })().catch(retry);
+                    })().catch((error) => {
+                        log.error("Attempt failed:", error);
+                        retry(error);
+                    });
                 });
             })().catch(log.error);
         }
